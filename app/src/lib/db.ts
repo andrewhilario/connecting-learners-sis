@@ -30,23 +30,132 @@ export function getRawConnectionString(): string | undefined {
   );
 }
 
-function normalizeConnection(rawUrl: string): { connectionString: string; isLocal: boolean } {
+function decodeSafe(value: string): string {
   try {
-    const parsed = new URL(rawUrl);
-    // pg-connection-string treats sslmode=require/prefer as verify-full and overwrites `ssl: { rejectUnauthorized: false }`.
-    parsed.searchParams.delete("sslmode");
-    parsed.searchParams.delete("ssl");
-    parsed.searchParams.delete("uselibpqcompat");
-    const host = parsed.hostname.toLowerCase();
-    const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1";
-    return { connectionString: parsed.toString(), isLocal };
+    return decodeURIComponent(value);
   } catch {
-    const cleaned = rawUrl
-      .replace(/([?&])(sslmode|ssl|uselibpqcompat)=[^&]*(&|$)/gi, "$1")
-      .replace(/[?&]+$/, "");
-    const isLocal = /@(localhost|127\.0\.0\.1)(:|\/)/i.test(cleaned);
-    return { connectionString: cleaned, isLocal };
+    return value;
   }
+}
+
+interface ParsedDbConfig {
+  user: string;
+  password?: string;
+  host: string;
+  port: number;
+  database: string;
+  isLocal: boolean;
+}
+
+/**
+ * Parses a PostgreSQL connection string without relying on `new URL()`, which throws
+ * `ERR_INVALID_URL` whenever a database password contains raw `#`, `?`, `/`, or `[...]` characters.
+ */
+function parseConnectionUrl(rawUrl: string): ParsedDbConfig {
+  let s = rawUrl.replace(/[\r\n]+/g, "").trim();
+  s = s.replace(/^(DATABASE_URL|POSTGRES_URL|SUPABASE_DB_URL)\s*=\s*/i, "").trim();
+  s = s.replace(/^psql\s+/i, "").trim();
+  while (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'")) ||
+    (s.startsWith("`") && s.endsWith("`"))
+  ) {
+    s = s.slice(1, -1).trim();
+  }
+  s = s.replace(/^jdbc:/i, "");
+
+  if (/^https?:\/\//i.test(s)) {
+    throw Object.assign(
+      new Error(
+        "DATABASE_URL is set to an HTTP URL (https://...) instead of a PostgreSQL URI (postgresql://...). In Supabase, click 'Connect' (top bar) -> 'Session pooler' and copy the postgresql:// string.",
+      ),
+      { code: "INVALID_DB_URL_FORMAT" },
+    );
+  }
+  if (/^eyJ[A-Za-z0-9_-]+\./.test(s) || /^sb_publishable_|^sbp_/.test(s)) {
+    throw Object.assign(
+      new Error(
+        "DATABASE_URL is set to a Supabase API key instead of a PostgreSQL connection string. In Supabase, click 'Connect' (top bar) -> 'Session pooler' and copy the postgresql:// string.",
+      ),
+      { code: "INVALID_DB_URL_FORMAT" },
+    );
+  }
+
+  // Handle key=value libpq style if someone pasted `host=... user=...`
+  if (!/^[a-z]+:\/\//i.test(s) && /\bhost\s*=/i.test(s)) {
+    const kv = Object.fromEntries(
+      Array.from(s.matchAll(/(\w+)\s*=\s*('[^']*'|"[^"]*"|\S+)/g), (m) => [
+        m[1].toLowerCase(),
+        m[2].replace(/^['"]|['"]$/g, ""),
+      ]),
+    );
+    const host = kv.host ?? "localhost";
+    const port = Number.parseInt(kv.port ?? "5432", 10) || 5432;
+    const user = kv.user ?? "postgres";
+    const password = kv.password ?? "";
+    const database = kv.dbname ?? kv.database ?? "postgres";
+    const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1";
+    return { user, password, host, port, database, isLocal };
+  }
+
+  const withoutScheme = s.replace(/^postgres(?:ql)?:\/\//i, "");
+  const lastAt = withoutScheme.lastIndexOf("@");
+  if (lastAt === -1) {
+    throw Object.assign(
+      new Error(
+        "DATABASE_URL is not a complete PostgreSQL URI (missing 'user:password@host'). Copy the full 'postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres' string from Supabase -> Connect -> Session pooler.",
+      ),
+      { code: "INVALID_DB_URL_FORMAT" },
+    );
+  }
+
+  const userInfo = withoutScheme.slice(0, lastAt);
+  const hostAndRest = withoutScheme.slice(lastAt + 1);
+
+  const firstColon = userInfo.indexOf(":");
+  const rawUser = firstColon === -1 ? userInfo : userInfo.slice(0, firstColon);
+  let rawPassword = firstColon === -1 ? "" : userInfo.slice(firstColon + 1);
+
+  // Strip accidental square brackets from Supabase's `[YOUR-PASSWORD]` template.
+  if (rawPassword.startsWith("[") && rawPassword.endsWith("]")) {
+    rawPassword = rawPassword.slice(1, -1);
+  }
+  if (/^YOUR[-_]?PASSWORD$/i.test(rawPassword)) {
+    throw Object.assign(
+      new Error(
+        "DATABASE_URL in Vercel still has the '[YOUR-PASSWORD]' placeholder. Replace [YOUR-PASSWORD] with your actual Supabase database password and redeploy.",
+      ),
+      { code: "INVALID_DB_URL_FORMAT" },
+    );
+  }
+
+  const user = decodeSafe(rawUser.replace(/^\[|\]$/g, ""));
+  const password = decodeSafe(rawPassword);
+
+  const pathPart = hostAndRest.split(/[?#]/)[0] ?? "";
+  const slashIdx = pathPart.indexOf("/");
+  const hostPort = (slashIdx === -1 ? pathPart : pathPart.slice(0, slashIdx)).trim();
+  const rawDb = slashIdx === -1 ? "postgres" : pathPart.slice(slashIdx + 1).trim();
+  const database = decodeSafe(rawDb) || "postgres";
+
+  const colonIdx = hostPort.lastIndexOf(":");
+  const rawHost = colonIdx === -1 ? hostPort : hostPort.slice(0, colonIdx);
+  const portStr = colonIdx === -1 ? "5432" : hostPort.slice(colonIdx + 1);
+  const host = rawHost.replace(/^\[|\]$/g, "").trim();
+  const port = Number.parseInt(portStr, 10) || 5432;
+
+  if (!host || /YOUR[-_]?HOST/i.test(host)) {
+    throw Object.assign(
+      new Error(
+        "DATABASE_URL in Vercel is missing a valid database hostname. Copy the 'Session pooler' URI from Supabase -> Connect.",
+      ),
+      { code: "INVALID_DB_URL_FORMAT" },
+    );
+  }
+
+  const lowerHost = host.toLowerCase();
+  const isLocal = lowerHost === "localhost" || lowerHost === "127.0.0.1" || lowerHost === "::1";
+  return { user, password, host, port, database, isLocal };
 }
 
 function createPool(): Pool {
@@ -57,7 +166,7 @@ function createPool(): Pool {
       { code: "NO_DB_URL" },
     );
   }
-  const { connectionString, isLocal } = normalizeConnection(rawUrl);
+  const { user, password, host, port, database, isLocal } = parseConnectionUrl(rawUrl);
 
   let ssl: false | { rejectUnauthorized: boolean; ca?: string } = false;
   if (process.env.DATABASE_SSL_CA) {
@@ -70,7 +179,11 @@ function createPool(): Pool {
   }
 
   const pool = new Pool({
-    connectionString,
+    user,
+    password,
+    host,
+    port,
+    database,
     ssl,
     max: Number(process.env.DATABASE_POOL_MAX ?? 5),
     idleTimeoutMillis: 30_000,
@@ -159,8 +272,8 @@ const UNIQUE_MESSAGES: Record<string, string> = {
 /** Converts a database error into a message that is safe to show to the user. */
 export function friendlyDbError(err: unknown): string {
   const e = err as { code?: string; message?: string; constraint?: string };
-  if (e?.code === "NO_DB_URL") {
-    return "DATABASE_URL is not set. Add DATABASE_URL in your Vercel project Environment Variables and redeploy.";
+  if (e?.code === "NO_DB_URL" || e?.code === "INVALID_DB_URL_FORMAT") {
+    return e.message ?? "DATABASE_URL is not configured properly.";
   }
   switch (e?.code) {
     case "P0001": // RAISE EXCEPTION from our procedures/triggers: written for end users
