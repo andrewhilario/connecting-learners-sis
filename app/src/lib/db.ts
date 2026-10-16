@@ -1,5 +1,6 @@
 import "server-only";
-import { Pool, type PoolClient, type QueryResultRow } from "pg";
+import { promises as dns } from "dns";
+import { Client, Pool, type PoolClient, type QueryResultRow } from "pg";
 
 export type Role = "admin" | "registrar" | "student";
 
@@ -18,7 +19,10 @@ const DB_ROLE: Record<Role, string> = {
   student: "sis_student",
 };
 
-const globalForPool = globalThis as unknown as { __sisPool?: Pool };
+const globalForPool = globalThis as unknown as {
+  __sisPool?: Pool;
+  __sisPoolPromise?: Promise<Pool>;
+};
 
 export function getRawConnectionString(): string | undefined {
   return (
@@ -158,7 +162,151 @@ function parseConnectionUrl(rawUrl: string): ParsedDbConfig {
   return { user, password, host, port, database, isLocal };
 }
 
-function createPool(): Pool {
+const IPV6_PREFIX_TO_AWS_REGION: Array<[string, string]> = [
+  ["2406:da18:", "ap-southeast-1"],
+  ["2406:da14:", "ap-northeast-1"],
+  ["2406:da12:", "ap-northeast-2"],
+  ["2406:da1a:", "ap-south-1"],
+  ["2406:da1c:", "ap-southeast-2"],
+  ["2600:1f18:", "us-east-1"],
+  ["2600:1f16:", "us-east-2"],
+  ["2600:1f1c:", "us-west-1"],
+  ["2600:1f14:", "us-west-2"],
+  ["2a05:d014:", "eu-central-1"],
+  ["2a05:d018:", "eu-west-1"],
+  ["2a05:d01c:", "eu-west-2"],
+  ["2a05:d012:", "eu-west-3"],
+  ["2a05:d016:", "eu-north-1"],
+  ["2a05:d022:", "eu-central-2"],
+  ["2600:1f1e:", "sa-east-1"],
+  ["2600:1f1a:", "ca-central-1"],
+];
+
+const SUPABASE_REGIONS = [
+  "ap-southeast-1",
+  "us-east-1",
+  "ap-northeast-1",
+  "ap-southeast-2",
+  "ap-northeast-2",
+  "ap-south-1",
+  "us-west-1",
+  "us-west-2",
+  "us-east-2",
+  "eu-central-1",
+  "eu-west-1",
+  "eu-west-2",
+  "eu-west-3",
+  "eu-north-1",
+  "eu-central-2",
+  "sa-east-1",
+  "ca-central-1",
+];
+
+async function probePoolerHost(
+  candidateHost: string,
+  user: string,
+  password: string | undefined,
+  database: string,
+): Promise<{ status: "ok"; host: string } | { status: "auth_error"; host: string; err: unknown } | { status: "not_found" }> {
+  const client = new Client({
+    host: candidateHost,
+    port: 5432,
+    user,
+    password,
+    database,
+    ssl: { rejectUnauthorized: false },
+    connectionTimeoutMillis: 3500,
+  });
+  try {
+    await client.connect();
+    await client.end().catch(() => {});
+    return { status: "ok", host: candidateHost };
+  } catch (err) {
+    const e = err as { code?: string; message?: string };
+    const msg = e?.message ?? "";
+    if (e?.code === "28P01" || e?.code === "28000" || /password authentication failed|circuit breaker/i.test(msg)) {
+      return { status: "auth_error", host: candidateHost, err };
+    }
+    return { status: "not_found" };
+  }
+}
+
+/**
+ * If the user configured Supabase's IPv6-only direct connection (`db.<project-ref>.supabase.co`),
+ * Vercel (IPv4-only) cannot reach it directly. This automatically resolves the project's IPv4
+ * Supavisor Session Pooler (`aws-{0|1}-<region>.pooler.supabase.com:5432`) and rewrites the user
+ * to `postgres.<project-ref>`.
+ */
+async function resolveSupabaseDirectHost(cfg: ParsedDbConfig): Promise<ParsedDbConfig> {
+  const directMatch = /^db\.([a-z0-9]+)\.supabase\.co$/i.exec(cfg.host);
+  if (!directMatch) return cfg;
+
+  const projectRef = directMatch[1].toLowerCase();
+  const poolerUser = cfg.user.includes(".") ? cfg.user : `${cfg.user}.${projectRef}`;
+
+  // 1. Try to identify the exact AWS region from the IPv6 AAAA record of db.<ref>.supabase.co.
+  let hintedRegion: string | null = null;
+  try {
+    const ipv6List = await Promise.race([
+      dns.resolve6(cfg.host),
+      new Promise<string[]>((_, reject) => setTimeout(() => reject(new Error("dns timeout")), 1500)),
+    ]);
+    const addr = (ipv6List[0] ?? "").toLowerCase();
+    for (const [prefix, region] of IPV6_PREFIX_TO_AWS_REGION) {
+      if (addr.startsWith(prefix)) {
+        hintedRegion = region;
+        break;
+      }
+    }
+  } catch {
+    // Ignore DNS lookup failure; we will probe the pooler regions directly.
+  }
+
+  if (hintedRegion) {
+    const fastCandidates = [
+      `aws-0-${hintedRegion}.pooler.supabase.com`,
+      `aws-1-${hintedRegion}.pooler.supabase.com`,
+    ];
+    const fastResults = await Promise.all(
+      fastCandidates.map((h) => probePoolerHost(h, poolerUser, cfg.password, cfg.database)),
+    );
+    for (const res of fastResults) {
+      if (res.status === "ok") {
+        return { ...cfg, user: poolerUser, host: res.host, port: 5432, isLocal: false };
+      }
+      if (res.status === "auth_error") {
+        throw res.err;
+      }
+    }
+  }
+
+  // 2. Probe all Supabase regions in parallel.
+  const allCandidates: string[] = [];
+  for (const r of SUPABASE_REGIONS) {
+    if (r === hintedRegion) continue;
+    allCandidates.push(`aws-0-${r}.pooler.supabase.com`, `aws-1-${r}.pooler.supabase.com`);
+  }
+  const allResults = await Promise.all(
+    allCandidates.map((h) => probePoolerHost(h, poolerUser, cfg.password, cfg.database)),
+  );
+  for (const res of allResults) {
+    if (res.status === "ok") {
+      return { ...cfg, user: poolerUser, host: res.host, port: 5432, isLocal: false };
+    }
+    if (res.status === "auth_error") {
+      throw res.err;
+    }
+  }
+
+  throw Object.assign(
+    new Error(
+      `DATABASE_URL uses the direct host '${cfg.host}', which cannot be reached from Vercel (IPv4) and project '${projectRef}' was not found on any active Supabase pooler. Make sure your Supabase project is not paused, then copy the 'Session pooler' URI from Supabase -> Connect.`,
+    ),
+    { code: "INVALID_DB_URL_FORMAT" },
+  );
+}
+
+async function createPool(): Promise<Pool> {
   const rawUrl = getRawConnectionString();
   if (!rawUrl) {
     throw Object.assign(
@@ -166,7 +314,8 @@ function createPool(): Pool {
       { code: "NO_DB_URL" },
     );
   }
-  const { user, password, host, port, database, isLocal } = parseConnectionUrl(rawUrl);
+  const parsed = parseConnectionUrl(rawUrl);
+  const { user, password, host, port, database, isLocal } = await resolveSupabaseDirectHost(parsed);
 
   let ssl: false | { rejectUnauthorized: boolean; ca?: string } = false;
   if (process.env.DATABASE_SSL_CA) {
@@ -193,9 +342,20 @@ function createPool(): Pool {
   return pool;
 }
 
-export function getPool(): Pool {
-  if (!globalForPool.__sisPool) globalForPool.__sisPool = createPool();
-  return globalForPool.__sisPool;
+export async function getPool(): Promise<Pool> {
+  if (globalForPool.__sisPool) return globalForPool.__sisPool;
+  if (!globalForPool.__sisPoolPromise) {
+    globalForPool.__sisPoolPromise = createPool()
+      .then((pool) => {
+        globalForPool.__sisPool = pool;
+        return pool;
+      })
+      .catch((err) => {
+        globalForPool.__sisPoolPromise = undefined;
+        throw err;
+      });
+  }
+  return globalForPool.__sisPoolPromise;
 }
 
 export interface Db {
@@ -224,7 +384,8 @@ function wrap(client: PoolClient): Db {
  * to the audit triggers as `app.current_user`.
  */
 export async function withDb<T>(user: SessionUser | null, fn: (db: Db) => Promise<T>): Promise<T> {
-  const client = await getPool().connect();
+  const pool = await getPool();
+  const client = await pool.connect();
   try {
     await client.query("BEGIN");
     if (user) {
@@ -271,7 +432,7 @@ const UNIQUE_MESSAGES: Record<string, string> = {
 
 /** Converts a database error into a message that is safe to show to the user. */
 export function friendlyDbError(err: unknown): string {
-  const e = err as { code?: string; message?: string; constraint?: string };
+  const e = err as { code?: string; message?: string; constraint?: string; hostname?: string; address?: string };
   if (e?.code === "NO_DB_URL" || e?.code === "INVALID_DB_URL_FORMAT") {
     return e.message ?? "DATABASE_URL is not configured properly.";
   }
@@ -300,8 +461,10 @@ export function friendlyDbError(err: unknown): string {
     case "ENOTFOUND":
     case "ENETUNREACH":
     case "ECONNREFUSED":
-    case "ETIMEDOUT":
-      return "Cannot reach the database host. On Supabase, use the 'Session pooler' connection string (aws-0-...pooler.supabase.com:5432), not the direct db.<ref>.supabase.co host.";
+    case "ETIMEDOUT": {
+      const target = e?.hostname || e?.address || "";
+      return `Cannot reach the database host${target ? ` (${target})` : ""}. On Supabase, click 'Connect' -> 'Session pooler' (aws-0-...pooler.supabase.com:5432) instead of the direct connection.`;
+    }
     case "SELF_SIGNED_CERT_IN_CHAIN":
     case "DEPTH_ZERO_SELF_SIGNED_CERT":
       return "Database TLS certificate error. Ensure the latest deployment is active.";

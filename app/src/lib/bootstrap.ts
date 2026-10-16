@@ -30,7 +30,8 @@ let initialized = false;
  */
 export async function ensureDatabaseInitialized(): Promise<void> {
   if (initialized) return;
-  const client = await getPool().connect();
+  const pool = await getPool();
+  const client = await pool.connect();
   try {
     const check = await client.query<{ exists: boolean }>(
       "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'users') AS exists",
