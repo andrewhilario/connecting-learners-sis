@@ -4,14 +4,14 @@ import { ActionForm, ConfirmActionButton } from "@/components/ActionForm";
 import { btnSecondary, inputCls, tdCls, thCls } from "@/components/styles";
 import { Card, Field, PageHeader, Pagination, Table, first, likePattern, parsePage, type SearchParams } from "@/components/ui";
 import { withDb } from "@/lib/db";
-import { requireRole, STAFF } from "@/lib/session";
+import { requireUser } from "@/lib/session";
 import { createSubject, deleteSubject } from "./actions";
 
 export const metadata: Metadata = { title: "Subjects" };
 const PAGE_SIZE = 10;
 
 export default async function SubjectsPage({ searchParams }: { searchParams: SearchParams }) {
-  const user = await requireRole(...STAFF);
+  const user = await requireUser();
   const sp = await searchParams;
   const q = first(sp.q).trim().slice(0, 100);
   const page = parsePage(first(sp.page));
@@ -33,7 +33,10 @@ export default async function SubjectsPage({ searchParams }: { searchParams: Sea
 
   return (
     <>
-      <PageHeader title="Subjects" subtitle={isAdmin ? "Manage the subject catalog." : "Subject catalog (read-only for registrars)."} />
+      <PageHeader
+        title="Subjects"
+        subtitle={isAdmin ? "Manage the subject catalog." : "Official ICCT Colleges course and subject catalog."}
+      />
 
       {isAdmin ? (
         <Card title="Add subject" className="mb-6 max-w-3xl">
@@ -69,17 +72,21 @@ export default async function SubjectsPage({ searchParams }: { searchParams: Sea
             <th className={thCls}>Code</th>
             <th className={thCls}>Title</th>
             <th className={thCls}>Units</th>
-            <th className={thCls}>Sections</th>
+            <th className={thCls}>Offered sections</th>
             {isAdmin ? <th className={thCls}>Actions</th> : null}
           </>
         }
       >
         {rows.map((s) => (
           <tr key={s.subject_id}>
-            <td className={tdCls}>{s.code}</td>
+            <td className={`${tdCls} font-semibold text-indigo-900`}>{s.code}</td>
             <td className={tdCls}>{s.title}</td>
             <td className={tdCls}>{s.units}</td>
-            <td className={tdCls}>{s.sections}</td>
+            <td className={tdCls}>
+              <Link href={`/sections?q=${encodeURIComponent(s.code)}`} className="text-indigo-700 underline">
+                {s.sections} section{Number(s.sections) === 1 ? "" : "s"}
+              </Link>
+            </td>
             {isAdmin ? (
               <td className={tdCls}>
                 <div className="flex items-start gap-2">

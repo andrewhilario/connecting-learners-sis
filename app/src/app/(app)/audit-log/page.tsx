@@ -6,7 +6,7 @@ import { requireRole } from "@/lib/session";
 
 export const metadata: Metadata = { title: "Audit log" };
 const PAGE_SIZE = 20;
-const TABLES = ["students", "subjects", "sections", "enrollments", "grades", "users", "announcements"];
+const TABLES = ["students", "programs", "subjects", "instructors", "sections", "enrollments", "grades", "users", "announcements"];
 const ACTIONS = ["INSERT", "UPDATE", "DELETE"];
 
 type Json = Record<string, unknown> | null;

@@ -428,6 +428,8 @@ const UNIQUE_MESSAGES: Record<string, string> = {
   uq_sections_offering: "That section already exists for this subject and term.",
   uq_enrollments_student_section: "The student is already enrolled in that section.",
   instructors_email_key: "An instructor with that e-mail already exists.",
+  programs_code_key: "A program with that code already exists.",
+  programs_name_key: "A program with that title already exists.",
 };
 
 /** Converts a database error into a message that is safe to show to the user. */

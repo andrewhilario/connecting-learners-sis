@@ -34,6 +34,7 @@ export default async function SectionsPage({ searchParams }: { searchParams: Sea
   const termMatch = /^(\d{4}-\d{4})\|([123])$/.exec(termRaw);
   const page = parsePage(first(sp.page));
   const isAdmin = user.role === "admin";
+  const isStaff = user.role === "admin" || user.role === "registrar";
 
   const { rows, terms } = await withDb(user, async (db) => ({
     rows: await db.query<Row>(
@@ -106,7 +107,7 @@ export default async function SectionsPage({ searchParams }: { searchParams: Sea
             <th className={thCls}>Room</th>
             <th className={thCls}>Instructor</th>
             <th className={thCls}>Seats</th>
-            {isAdmin ? <th className={thCls}>Actions</th> : null}
+            {isStaff ? <th className={thCls}>Actions</th> : null}
           </>
         }
       >
@@ -128,17 +129,24 @@ export default async function SectionsPage({ searchParams }: { searchParams: Sea
               {s.enrolled_count}/{s.capacity}
               {Number(s.seats_left) <= 0 ? <span className="ml-1 text-xs font-medium text-red-700">Full</span> : null}
             </td>
-            {isAdmin ? (
+            {isStaff ? (
               <td className={tdCls}>
                 <div className="flex items-start gap-2">
-                  <Link href={`/sections/${s.section_id}/edit`} className={`${btnSecondary} px-2 py-1 text-xs`}>
-                    Edit
+                  <Link href={`/sections/${s.section_id}`} className={`${btnSecondary} px-2 py-1 text-xs`}>
+                    Roster
                   </Link>
-                  <ConfirmActionButton
-                    action={deleteSection.bind(null, s.section_id)}
-                    label="Delete"
-                    confirmText={`Delete section ${s.subject_code}-${s.section_code} (${s.school_year}, sem ${s.semester})?`}
-                  />
+                  {isAdmin ? (
+                    <>
+                      <Link href={`/sections/${s.section_id}/edit`} className={`${btnSecondary} px-2 py-1 text-xs`}>
+                        Edit
+                      </Link>
+                      <ConfirmActionButton
+                        action={deleteSection.bind(null, s.section_id)}
+                        label="Delete"
+                        confirmText={`Delete section ${s.subject_code}-${s.section_code} (${s.school_year}, sem ${s.semester})?`}
+                      />
+                    </>
+                  ) : null}
                 </div>
               </td>
             ) : null}

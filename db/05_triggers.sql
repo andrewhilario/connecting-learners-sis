@@ -34,7 +34,9 @@ END;
 $$;
 
 CREATE TRIGGER trg_audit_students      AFTER INSERT OR UPDATE OR DELETE ON students      FOR EACH ROW EXECUTE FUNCTION fn_audit('student_id');
+CREATE TRIGGER trg_audit_programs      AFTER INSERT OR UPDATE OR DELETE ON programs      FOR EACH ROW EXECUTE FUNCTION fn_audit('program_id');
 CREATE TRIGGER trg_audit_subjects      AFTER INSERT OR UPDATE OR DELETE ON subjects      FOR EACH ROW EXECUTE FUNCTION fn_audit('subject_id');
+CREATE TRIGGER trg_audit_instructors   AFTER INSERT OR UPDATE OR DELETE ON instructors   FOR EACH ROW EXECUTE FUNCTION fn_audit('instructor_id');
 CREATE TRIGGER trg_audit_sections      AFTER INSERT OR UPDATE OR DELETE ON sections      FOR EACH ROW EXECUTE FUNCTION fn_audit('section_id');
 CREATE TRIGGER trg_audit_enrollments   AFTER INSERT OR UPDATE OR DELETE ON enrollments   FOR EACH ROW EXECUTE FUNCTION fn_audit('enrollment_id');
 CREATE TRIGGER trg_audit_grades        AFTER INSERT OR UPDATE OR DELETE ON grades        FOR EACH ROW EXECUTE FUNCTION fn_audit('grade_id');

@@ -121,7 +121,9 @@ export default async function StudentsPage({ searchParams }: { searchParams: Sea
           <tr key={s.student_id}>
             <td className={tdCls}>{s.student_no}</td>
             <td className={tdCls}>
-              {s.last_name}, {s.first_name}
+              <Link href={`/students/${s.student_id}`} className="font-medium text-indigo-800 hover:underline">
+                {s.last_name}, {s.first_name}
+              </Link>
             </td>
             <td className={tdCls}>{s.email}</td>
             <td className={tdCls}>{s.program}</td>
@@ -131,6 +133,9 @@ export default async function StudentsPage({ searchParams }: { searchParams: Sea
             </td>
             <td className={tdCls}>
               <div className="flex items-start gap-2">
+                <Link href={`/students/${s.student_id}`} className={`${btnSecondary} px-2 py-1 text-xs`}>
+                  View
+                </Link>
                 <Link href={`/students/${s.student_id}/edit`} className={`${btnSecondary} px-2 py-1 text-xs`}>
                   Edit
                 </Link>
