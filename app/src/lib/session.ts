@@ -18,9 +18,31 @@ function secretKey(): Uint8Array {
   return new Uint8Array(createHash("sha256").update(raw).digest());
 }
 
-/** Issues a signed, httpOnly session cookie. Only the user id is stored in the token. */
+interface UserRow {
+  user_id: number;
+  username: string;
+  role: Role;
+  is_active: boolean;
+  student_id: number | null;
+}
+
+/** Issues a signed, httpOnly session cookie embedding verified session claims for fast navigation. */
 export async function createSession(userId: number): Promise<void> {
-  const token = await new SignJWT({ uid: userId })
+  const row = await withDb(null, (db) =>
+    db.one<UserRow>(
+      `SELECT u.user_id, u.username, u.role, u.is_active, s.student_id
+         FROM users u LEFT JOIN students s ON s.user_id = u.user_id
+        WHERE u.user_id = $1`,
+      [userId],
+    ),
+  );
+
+  const token = await new SignJWT({
+    uid: userId,
+    username: row?.username,
+    role: row?.role,
+    studentId: row?.student_id ?? null,
+  })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(`${SESSION_HOURS}h`)
@@ -39,17 +61,13 @@ export async function destroySession(): Promise<void> {
   (await cookies()).delete(COOKIE_NAME);
 }
 
-interface UserRow {
-  user_id: number;
-  username: string;
-  role: Role;
-  is_active: boolean;
-  student_id: number | null;
+function isValidRole(value: unknown): value is Role {
+  return value === "admin" || value === "registrar" || value === "student";
 }
 
 /**
- * Resolves the logged-in user. The role and active flag are re-read from the database on every
- * request, so deactivating an account or changing its role takes effect immediately.
+ * Resolves the logged-in user from the signed JWT cookie. Falls back to a database lookup
+ * if an older cookie only stores `{ uid }`.
  */
 export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
   const token = (await cookies()).get(COOKIE_NAME)?.value;
@@ -59,6 +77,14 @@ export const getCurrentUser = cache(async (): Promise<SessionUser | null> => {
   try {
     const { payload } = await jwtVerify(token, secretKey(), { algorithms: ["HS256"] });
     if (typeof payload.uid !== "number") return null;
+    if (typeof payload.username === "string" && isValidRole(payload.role)) {
+      return {
+        userId: payload.uid,
+        username: payload.username,
+        role: payload.role,
+        studentId: typeof payload.studentId === "number" ? payload.studentId : null,
+      };
+    }
     userId = payload.uid;
   } catch {
     return null;

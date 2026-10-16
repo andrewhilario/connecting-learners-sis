@@ -334,7 +334,7 @@ async function createPool(): Promise<Pool> {
     port,
     database,
     ssl,
-    max: Number(process.env.DATABASE_POOL_MAX ?? 5),
+    max: Number(process.env.DATABASE_POOL_MAX ?? 3),
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
   });
@@ -377,11 +377,12 @@ function wrap(client: PoolClient): Db {
   };
 }
 
+let roleSwitchSupported = process.env.DB_ENFORCE_ROLES !== "false";
+
 /**
  * Runs `fn` inside one transaction. When a user is supplied (and DB_ENFORCE_ROLES is not "false")
- * the transaction switches to that user's PostgreSQL role, so database privileges and row-level
- * security are enforced in addition to the application checks. The acting user's name is exposed
- * to the audit triggers as `app.current_user`.
+ * the transaction switches to that user's PostgreSQL role and sets `app.current_user` and `app.student_id`
+ * in a single round-trip.
  */
 export async function withDb<T>(user: SessionUser | null, fn: (db: Db) => Promise<T>): Promise<T> {
   const pool = await getPool();
@@ -389,20 +390,28 @@ export async function withDb<T>(user: SessionUser | null, fn: (db: Db) => Promis
   try {
     await client.query("BEGIN");
     if (user) {
-      if (process.env.DB_ENFORCE_ROLES !== "false") {
-        await client.query("SAVEPOINT sp_role");
+      const studentIdStr = user.studentId === null ? "" : String(user.studentId);
+      if (roleSwitchSupported) {
         try {
-          await client.query(`SET LOCAL ROLE ${DB_ROLE[user.role]}`);
-          await client.query("RELEASE SAVEPOINT sp_role");
+          await client.query(
+            "SELECT set_config('role', $1, true), set_config('app.current_user', $2, true), set_config('app.student_id', $3, true)",
+            [DB_ROLE[user.role], user.username, studentIdStr],
+          );
         } catch {
-          // If the cloud pooler user cannot SET ROLE, fall back cleanly to app-level role checks.
-          await client.query("ROLLBACK TO SAVEPOINT sp_role");
+          roleSwitchSupported = false;
+          await client.query("ROLLBACK");
+          await client.query("BEGIN");
+          await client.query("SELECT set_config('app.current_user', $1, true), set_config('app.student_id', $2, true)", [
+            user.username,
+            studentIdStr,
+          ]);
         }
+      } else {
+        await client.query("SELECT set_config('app.current_user', $1, true), set_config('app.student_id', $2, true)", [
+          user.username,
+          studentIdStr,
+        ]);
       }
-      await client.query("SELECT set_config('app.current_user', $1, true), set_config('app.student_id', $2, true)", [
-        user.username,
-        user.studentId === null ? "" : String(user.studentId),
-      ]);
     }
     const result = await fn(wrap(client));
     await client.query("COMMIT");
