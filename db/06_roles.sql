@@ -22,21 +22,27 @@ END $$;
 -- Allow the account that runs this script (and the app connection) to SET ROLE.
 GRANT sis_admin, sis_registrar, sis_student TO CURRENT_USER;
 
--- Start from zero: nobody gets anything by default ---------------------------
-REVOKE ALL ON ALL TABLES    IN SCHEMA public FROM PUBLIC;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL ON ALL PROCEDURES IN SCHEMA public FROM PUBLIC;
+-- Start from zero on our SIS objects: nobody gets anything by default ---------
+REVOKE ALL ON TABLE users, programs, instructors, students, subjects, sections,
+                    enrollments, grades, announcements, audit_log,
+                    v_section_roster, v_student_grades, v_student_gpa, v_student_enrollment_summary
+    FROM PUBLIC;
+REVOKE ALL ON PROCEDURE sp_enroll_student(INTEGER, INTEGER),
+                        sp_transfer_section(INTEGER, INTEGER, INTEGER)
+    FROM PUBLIC;
 
 -- Supabase auto-exposes the public schema through its REST API to the
--- anon/authenticated roles. Remove their access to our tables entirely.
+-- anon/authenticated roles. Remove their access to our SIS tables.
 DO $$
 DECLARE r TEXT;
 BEGIN
     FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-            EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', r);
-            EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', r);
-            EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM %I', r);
+            EXECUTE format(
+                'REVOKE ALL ON TABLE users, programs, instructors, students, subjects, sections, enrollments, grades, announcements, audit_log, v_section_roster, v_student_grades, v_student_gpa, v_student_enrollment_summary FROM %I',
+                r
+            );
+            EXECUTE format('REVOKE ALL ON PROCEDURE sp_enroll_student(INTEGER, INTEGER), sp_transfer_section(INTEGER, INTEGER, INTEGER) FROM %I', r);
         END IF;
     END LOOP;
 END $$;
@@ -66,14 +72,27 @@ DO $$
 DECLARE t TEXT;
 BEGIN
     FOREACH t IN ARRAY ARRAY['programs','instructors','students','subjects','sections','enrollments','grades','announcements'] LOOP
+        EXECUTE format('DROP POLICY IF EXISTS p_admin_all ON %I', t);
         EXECUTE format('CREATE POLICY p_admin_all ON %I FOR ALL TO sis_admin USING (true) WITH CHECK (true)', t);
+        EXECUTE format('DROP POLICY IF EXISTS p_registrar_all ON %I', t);
         EXECUTE format('CREATE POLICY p_registrar_all ON %I FOR ALL TO sis_registrar USING (true) WITH CHECK (true)', t);
     END LOOP;
 END $$;
-CREATE POLICY p_admin_all ON users     FOR ALL    TO sis_admin USING (true) WITH CHECK (true);
-CREATE POLICY p_admin_all ON audit_log FOR ALL    TO sis_admin USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS p_admin_all ON users;
+CREATE POLICY p_admin_all ON users     FOR ALL TO sis_admin USING (true) WITH CHECK (true);
+DROP POLICY IF EXISTS p_admin_all ON audit_log;
+CREATE POLICY p_admin_all ON audit_log FOR ALL TO sis_admin USING (true) WITH CHECK (true);
 
 -- Policies: students -----------------------------------------------------------
+DROP POLICY IF EXISTS p_student_ref_programs    ON programs;
+DROP POLICY IF EXISTS p_student_ref_instructors ON instructors;
+DROP POLICY IF EXISTS p_student_ref_subjects    ON subjects;
+DROP POLICY IF EXISTS p_student_ref_sections    ON sections;
+DROP POLICY IF EXISTS p_student_own_profile     ON students;
+DROP POLICY IF EXISTS p_student_own_enrollments ON enrollments;
+DROP POLICY IF EXISTS p_student_own_grades      ON grades;
+DROP POLICY IF EXISTS p_student_announcements   ON announcements;
+
 CREATE POLICY p_student_ref_programs    ON programs    FOR SELECT TO sis_student USING (true);
 CREATE POLICY p_student_ref_instructors ON instructors FOR SELECT TO sis_student USING (true);
 CREATE POLICY p_student_ref_subjects    ON subjects    FOR SELECT TO sis_student USING (true);
@@ -85,8 +104,10 @@ CREATE POLICY p_student_own_grades      ON grades      FOR SELECT TO sis_student
 CREATE POLICY p_student_announcements   ON announcements FOR SELECT TO sis_student USING (audience IN ('all', 'students'));
 
 -- Table privileges ---------------------------------------------------------------
--- Admin: everything.
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO sis_admin;
+-- Admin: everything on SIS tables.
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    users, programs, instructors, students, subjects, sections, enrollments, grades, announcements
+    TO sis_admin;
 -- audit_log is write-protected for every role: rows are written only by the SECURITY DEFINER
 -- trigger function, and the immutability trigger blocks UPDATE/DELETE as well.
 REVOKE INSERT, UPDATE, DELETE ON audit_log FROM sis_admin;

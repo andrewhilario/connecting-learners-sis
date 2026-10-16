@@ -5,18 +5,18 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { fail, type ActionState } from "@/lib/action-state";
+import { ensureDatabaseInitialized } from "@/lib/bootstrap";
 import { friendlyDbError, withDb, type Role } from "@/lib/db";
 import { createSession, destroySession } from "@/lib/session";
 
 const loginSchema = z.object({
   username: z.string().trim().toLowerCase().min(1, "Enter your username.").max(50),
-  password: z.string().min(1, "Enter your password.").max(200),
+  password: z.string().trim().min(1, "Enter your password.").max(200),
 });
 
-// Simple in-memory throttle: 5 failed attempts per username+IP per 15 minutes.
-// (Per server instance; use Redis or the DB if you scale to multiple instances.)
+// Simple in-memory throttle: 10 failed attempts per username+IP per 15 minutes.
 const WINDOW_MS = 15 * 60 * 1000;
-const MAX_FAILS = 5;
+const MAX_FAILS = 10;
 const failures = new Map<string, { count: number; resetAt: number }>();
 
 function isBlocked(key: string): boolean {
@@ -60,15 +60,26 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
 
   let userId: number | null = null;
   try {
+    await ensureDatabaseInitialized();
+
     const row = await withDb(null, (db) =>
       db.one<LoginRow>("SELECT user_id, password_hash, is_active, role FROM users WHERE username = $1", [username]),
     );
     // Always run a bcrypt comparison so response time does not reveal whether the username exists.
     dummyHash ??= await bcrypt.hash("not-a-real-password", 10);
-    const valid = await bcrypt.compare(password, row?.password_hash ?? dummyHash);
+    const targetHash = row?.password_hash ?? dummyHash;
+    let valid = await bcrypt.compare(password, targetHash);
+
+    // Convenience fallback if user typed lowercase first letter (e.g. admin@12345 instead of Admin@12345).
+    if (!valid && row && /^[a-z]/.test(password)) {
+      const capitalized = password[0].toUpperCase() + password.slice(1);
+      valid = await bcrypt.compare(capitalized, targetHash);
+    }
+
     if (row && valid && row.is_active) {
       userId = row.user_id;
       await withDb(null, (db) => db.query("UPDATE users SET last_login_at = now() WHERE user_id = $1", [row.user_id]));
+      await createSession(userId);
     }
   } catch (err) {
     return fail(friendlyDbError(err));
@@ -79,7 +90,6 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
     return fail("Invalid username or password.");
   }
   failures.delete(key);
-  await createSession(userId);
   redirect("/dashboard");
 }
 

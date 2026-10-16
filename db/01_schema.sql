@@ -5,7 +5,10 @@
 -- Re-runnable: drops and recreates all SIS objects.
 -- =============================================================================
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+DO $$ BEGIN
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 
 -- ---------- Reset (reverse dependency order) ---------------------------------
 DROP VIEW  IF EXISTS v_student_gpa, v_student_grades, v_student_enrollment_summary, v_section_roster CASCADE;

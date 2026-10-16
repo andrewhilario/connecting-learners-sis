@@ -4,18 +4,19 @@
 --   admin      / Admin@12345
 --   registrar  / Registrar@12345
 --   student1 .. student5 / Student@12345   (linked to students 1..5)
--- Passwords are hashed with bcrypt via pgcrypto (compatible with bcryptjs).
+-- Passwords are stored as standard bcrypt cost-10 hashes (compatible with bcryptjs
+-- and pgcrypto without requiring extension search_path configuration).
 -- =============================================================================
 
 -- users --------------------------------------------------------------------
 INSERT INTO users (username, password_hash, role) VALUES
- ('admin',     crypt('Admin@12345',     gen_salt('bf', 10)), 'admin'),
- ('registrar', crypt('Registrar@12345', gen_salt('bf', 10)), 'registrar'),
- ('student1',  crypt('Student@12345',   gen_salt('bf', 10)), 'student'),
- ('student2',  crypt('Student@12345',   gen_salt('bf', 10)), 'student'),
- ('student3',  crypt('Student@12345',   gen_salt('bf', 10)), 'student'),
- ('student4',  crypt('Student@12345',   gen_salt('bf', 10)), 'student'),
- ('student5',  crypt('Student@12345',   gen_salt('bf', 10)), 'student');
+ ('admin',     '$2b$10$PYU3FKIhl9.aEkblqgPUYObDGIn1I36wKwNHBo1kgJkHSGVU/EpYe', 'admin'),
+ ('registrar', '$2b$10$2lv6jVrszuufb34PS8RL8..6E/rX4t2M6e6ztAVFIqT.3vojXbvuy', 'registrar'),
+ ('student1',  '$2b$10$yRlOl8YFsaYBTxlaxpcWdOPcBs6A6fs0jK8xzxIIu/7lOa39BDvZe', 'student'),
+ ('student2',  '$2b$10$yRlOl8YFsaYBTxlaxpcWdOPcBs6A6fs0jK8xzxIIu/7lOa39BDvZe', 'student'),
+ ('student3',  '$2b$10$yRlOl8YFsaYBTxlaxpcWdOPcBs6A6fs0jK8xzxIIu/7lOa39BDvZe', 'student'),
+ ('student4',  '$2b$10$yRlOl8YFsaYBTxlaxpcWdOPcBs6A6fs0jK8xzxIIu/7lOa39BDvZe', 'student'),
+ ('student5',  '$2b$10$yRlOl8YFsaYBTxlaxpcWdOPcBs6A6fs0jK8xzxIIu/7lOa39BDvZe', 'student');
 
 -- programs -----------------------------------------------------------------
 INSERT INTO programs (code, name) VALUES
